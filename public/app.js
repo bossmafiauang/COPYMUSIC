@@ -8,6 +8,7 @@
   let previewSource = null;
   let vuRAF = null;
   let wavBlobUrl = null, mp3BlobUrl = null, oggBlobUrl = null;
+  let lastRenderedBuffer = null;
 
   const el = id => document.getElementById(id);
   const dropZone = el('dropZone'), fileInput = el('fileInput');
@@ -354,35 +355,84 @@
     }
   }
 
-  // ---------- OGG encoding (real-time capture via MediaRecorder) ----------
+  // ---------- OGG encoding (fast, offline, via WebAssembly Opus encoder worker) ----------
   function encodeOgg(buffer){
     return new Promise((resolve)=>{
+      let settled = false;
+      let worker;
+      const finish = (result)=>{
+        if(settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        try{ if(worker) worker.terminate(); }catch(e){}
+        resolve(result);
+      };
+      // Safety timeout: never let this hang the UI forever if something goes wrong.
+      const timeoutMs = Math.max(15000, buffer.duration * 1000 * 0.5 + 10000);
+      const timeoutId = setTimeout(()=>{ console.error('OGG encode timed out'); finish(null); }, timeoutMs);
+
       try{
-        const mimeType = 'audio/ogg;codecs=opus';
-        if(!window.MediaRecorder || !MediaRecorder.isTypeSupported(mimeType)){
-          resolve(null);
-          return;
-        }
-        const ctx = new (window.AudioContext||window.webkitAudioContext)();
-        const src = ctx.createBufferSource();
-        src.buffer = buffer;
-        const dest = ctx.createMediaStreamDestination();
-        src.connect(dest);
-        const recorder = new MediaRecorder(dest.stream, {mimeType});
-        const chunks = [];
-        recorder.ondataavailable = ev=>{ if(ev.data && ev.data.size>0) chunks.push(ev.data); };
-        recorder.onstop = ()=>{
-          ctx.close();
-          resolve(chunks.length ? new Blob(chunks, {type:'audio/ogg'}) : null);
-        };
-        recorder.onerror = ()=>{ try{ctx.close();}catch(e){} resolve(null); };
-        recorder.start();
-        src.start(0);
-        src.onended = ()=>{ setTimeout(()=>{ try{ recorder.stop(); }catch(e){ resolve(null); } }, 200); };
+        worker = new Worker('encoderWorker.min.js');
       }catch(err){
-        console.error('OGG encode setup failed', err);
-        resolve(null);
+        console.error('Could not start OGG encoder worker', err);
+        finish(null);
+        return;
       }
+
+      const numberOfChannels = Math.min(2, buffer.numberOfChannels);
+      const channelData = [];
+      for(let c=0;c<numberOfChannels;c++) channelData.push(buffer.getChannelData(c));
+      const totalLength = buffer.length;
+      const bufferLength = 4096;
+      const pages = [];
+
+      worker.onerror = (err)=>{
+        console.error('OGG encoder worker error', err);
+        finish(null);
+      };
+
+      worker.onmessage = (e)=>{
+        const data = e.data;
+        if(!data) return;
+        if(data.message === 'ready'){
+          worker.postMessage({ command: 'getHeaderPages' });
+        } else if(data.message === 'page'){
+          pages.push(data.page);
+          if(pages.length === 2){
+            sendAllChunks();
+          }
+        } else if(data.message === 'done'){
+          finish(new Blob(pages, {type:'audio/ogg'}));
+        }
+      };
+
+      function sendAllChunks(){
+        let pos = 0;
+        while(pos < totalLength){
+          const len = Math.min(bufferLength, totalLength - pos);
+          const chunkBuffers = [];
+          for(let c=0;c<numberOfChannels;c++){
+            const chunk = new Float32Array(bufferLength);
+            chunk.set(channelData[c].subarray(pos, pos+len));
+            chunkBuffers.push(chunk);
+          }
+          worker.postMessage({ command: 'encode', buffers: chunkBuffers });
+          pos += bufferLength;
+        }
+        worker.postMessage({ command: 'done' });
+      }
+
+      worker.postMessage({
+        command: 'init',
+        originalSampleRate: buffer.sampleRate,
+        numberOfChannels: numberOfChannels,
+        encoderSampleRate: 48000,
+        encoderBitRate: 128000,
+        encoderApplication: 2049,
+        encoderFrameSize: 20,
+        maxFramesPerPage: 40,
+        resampleQuality: 3
+      });
     });
   }
 
@@ -446,6 +496,16 @@
     loop();
   });
 
+  function triggerDownload(blobUrl, ext){
+    if(!blobUrl) return;
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = (sourceFile? sourceFile.name.replace(/\.[^.]+$/,'') : 'audio') + '_playbackbay.' + ext;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
   // ---------- Export pipeline ----------
   btnExport.addEventListener('click', async ()=>{
     if(!originalBuffer) return;
@@ -494,7 +554,8 @@
         btnMp3.disabled = true;
       }
 
-      setStatus('Encoding OGG (real-time, mohon tunggu)…');
+      setStatus('Encoding OGG…');
+      lastRenderedBuffer = rendered;
       let oggBlob = null;
       try{ oggBlob = await encodeOgg(rendered); }catch(err){ console.error('OGG encode failed', err); }
       if(oggBlob){
@@ -504,11 +565,21 @@
         btnOgg.title = '';
       } else {
         btnOgg.disabled = true;
-        btnOgg.title = 'Browser kamu tidak mendukung export OGG langsung — coba pakai Firefox, atau gunakan WAV/MP3.';
+        btnOgg.title = 'Encoding OGG gagal di browser ini. Gunakan MP3 atau WAV.';
       }
 
       const speedNormal = (1/speedRate).toFixed(2);
-      setStatus('Selesai. Speed Normal (di game): '+speedNormal+' · Durasi hasil: '+formatTime(rendered.duration), 'ok');
+
+      if(oggBlob){
+        setStatus('Selesai. Auto-download OGG · Speed Normal (di game): '+speedNormal+' · Durasi hasil: '+formatTime(rendered.duration), 'ok');
+        triggerDownload(oggBlobUrl, 'ogg');
+      } else if(mp3Blob){
+        setStatus('Selesai. OGG gagal di browser ini, auto-download MP3 sebagai gantinya · Speed Normal (di game): '+speedNormal+' · Durasi hasil: '+formatTime(rendered.duration), 'ok');
+        triggerDownload(mp3BlobUrl, 'mp3');
+      } else {
+        setStatus('Selesai. OGG & MP3 tidak tersedia, auto-download WAV · Speed Normal (di game): '+speedNormal+' · Durasi hasil: '+formatTime(rendered.duration), 'ok');
+        triggerDownload(wavBlobUrl, 'wav');
+      }
 
       saveHistoryEntry({
         filename: sourceFile ? sourceFile.name : 'audio',
@@ -530,27 +601,9 @@
     }
   });
 
-  btnWav.addEventListener('click', ()=>{
-    if(!wavBlobUrl) return;
-    const a = document.createElement('a');
-    a.href = wavBlobUrl;
-    a.download = (sourceFile? sourceFile.name.replace(/\.[^.]+$/,'') : 'audio') + '_playbackbay.wav';
-    a.click();
-  });
-  btnMp3.addEventListener('click', ()=>{
-    if(!mp3BlobUrl) return;
-    const a = document.createElement('a');
-    a.href = mp3BlobUrl;
-    a.download = (sourceFile? sourceFile.name.replace(/\.[^.]+$/,'') : 'audio') + '_playbackbay.mp3';
-    a.click();
-  });
-  btnOgg.addEventListener('click', ()=>{
-    if(!oggBlobUrl) return;
-    const a = document.createElement('a');
-    a.href = oggBlobUrl;
-    a.download = (sourceFile? sourceFile.name.replace(/\.[^.]+$/,'') : 'audio') + '_playbackbay.ogg';
-    a.click();
-  });
+  btnWav.addEventListener('click', ()=> triggerDownload(wavBlobUrl, 'wav'));
+  btnMp3.addEventListener('click', ()=> triggerDownload(mp3BlobUrl, 'mp3'));
+  btnOgg.addEventListener('click', ()=> triggerDownload(oggBlobUrl, 'ogg'));
 
   // ---------- History (localStorage, browser-local) ----------
   function readHistory(){
