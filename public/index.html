@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Playback Bay</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.0/lame.min.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="head">
+    <div>
+      <h1>PLAYBACK <span>BAY</span></h1>
+      <div class="tag">Personal audio prep console — speed · pitch · EQ · trim</div>
+    </div>
+    <div class="led-strip">
+      <div class="led" id="ledDecode"></div><span class="led-label">Decode</span>
+      <div class="led" id="ledProc"></div><span class="led-label">Process</span>
+      <div class="led" id="ledOut"></div><span class="led-label">Output</span>
+    </div>
+  </div>
+
+  <div class="grid">
+    <!-- LEFT: main console -->
+    <div>
+
+      <div class="panel">
+        <div class="panel-title">Source</div>
+        <div class="drop" id="dropZone">
+          <div class="big">Klik atau tarik file audio ke sini</div>
+          <div class="small">MP3 · WAV · OGG · M4A — diproses langsung di browser kamu</div>
+          <input type="file" id="fileInput" accept="audio/*">
+        </div>
+
+        <div class="file-meta" id="fileMeta" style="display:none;">
+          <span>File: <b id="fileName">—</b></span>
+          <span id="fileDur">0:00</span>
+        </div>
+
+        <div class="wave-box" id="waveBox">
+          <div style="position:relative;">
+            <canvas id="wave" width="1000" height="110"></canvas>
+            <div class="trim-overlay" id="trimOverlay"></div>
+          </div>
+          <div class="trim-row">
+            <div class="trim-field">
+              <label>Trim mulai <span class="readout" id="trimStartVal">0.00s</span></label>
+              <input type="range" id="trimStart" min="0" max="1" step="0.01" value="0">
+            </div>
+            <div class="trim-field">
+              <label>Trim selesai <span class="readout" id="trimEndVal">0.00s</span></label>
+              <input type="range" id="trimEnd" min="0" max="1" step="0.01" value="1">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <button class="adv-header" id="advToggle" type="button">
+          <span class="panel-title" style="margin:0;">⚙ Advanced Settings</span>
+          <span class="adv-summary" id="advSummary">(Speed: 1.00x, Amplify: 0 dB, Max: 400s)</span>
+          <span class="adv-chevron" id="advChevron">⌄</span>
+        </button>
+        <div class="adv-body" id="advBody">
+          <div class="adv-desc">Atur kecepatan, amplifikasi, dan durasi maksimal. EQ berlaku langsung saat diputar (preview). Sisanya diproses saat kamu menekan "Konversi Audio".</div>
+
+          <div class="field-label">Preset</div>
+          <div class="presets" id="speedPresets">
+            <div class="chip" data-speed="2.1">Lambat 2.1x</div>
+            <div class="chip" data-speed="2.3">Default 2.3x</div>
+            <div class="chip" data-speed="2.5">Cepat 2.5x</div>
+            <div class="chip" data-speed="2.7">Lebih Cepat 2.7x</div>
+            <div class="chip" data-speed="2.9">Ultra 2.9x</div>
+          </div>
+
+          <div class="hfader" style="margin-top:16px;">
+            <label>Kecepatan <span class="val" id="speedVal">1.00x</span></label>
+            <input type="range" id="speed" min="0.5" max="3" step="0.01" value="1">
+          </div>
+          <div class="hfader">
+            <label>Amplifikasi (dB) <span class="val" id="ampVal">0 dB</span></label>
+            <input type="range" id="amplify" min="-24" max="24" step="1" value="0">
+          </div>
+          <div class="hfader">
+            <label>Durasi Maks (detik) <span class="val" id="maxDurVal">400s</span></label>
+            <input type="range" id="maxDuration" min="30" max="400" step="10" value="400">
+          </div>
+          <div class="hfader">
+            <label>Pitch — tambahan, tidak ada di versi asli <span class="val" id="pitchVal">0 st</span></label>
+            <input type="range" id="pitch" min="-12" max="12" step="1" value="0">
+          </div>
+
+          <div class="readout" id="speedNormalReadout">Speed Normal (di game): 1.00</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">Equalizer</div>
+        <div class="eq-row" id="eqRow"><!-- filled by JS --></div>
+        <div class="presets" id="presets">
+          <div class="chip active" data-preset="flat">Flat</div>
+          <div class="chip" data-preset="bass">Bass</div>
+          <div class="chip" data-preset="vocal">Vocal</div>
+          <div class="chip" data-preset="bright">Bright</div>
+          <div class="chip" data-preset="lofi">Lo-Fi</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">Transport &amp; Export</div>
+        <div class="transport">
+          <button class="btn play" id="btnPreview" disabled>▶ Preview</button>
+          <div class="toggle-row"><input type="checkbox" id="normalizeToggle" checked> Normalize volume</div>
+        </div>
+
+        <div class="vu-wrap">
+          <svg class="vu-face" viewBox="0 0 120 70">
+            <path d="M10,65 A50,50 0 0,1 110,65" fill="none" stroke="#333" stroke-width="2"/>
+            <path d="M10,65 A50,50 0 0,1 40,20" fill="none" stroke="#3a2a2a" stroke-width="3"/>
+            <path d="M40,20 A50,50 0 0,1 90,20" fill="none" stroke="#2a3a2a" stroke-width="3"/>
+            <path d="M90,20 A50,50 0 0,1 110,65" fill="none" stroke="#3a2a2a" stroke-width="3"/>
+            <line id="vuNeedle" x1="60" y1="65" x2="60" y2="18" stroke="var(--brass)" stroke-width="2" stroke-linecap="round" style="transform-origin:60px 65px; transform:rotate(-45deg); transition:transform .08s linear;"/>
+            <circle cx="60" cy="65" r="4" fill="var(--brass)"/>
+          </svg>
+          <div>
+            <div class="vu-label">OUTPUT LEVEL</div>
+            <div class="led-strip" style="margin-top:6px;">
+              <div class="led" id="ledPeak"></div><span class="led-label">Peak</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="export-row">
+          <button class="btn primary" id="btnExport" disabled>⚙ Konversi Audio</button>
+          <button class="btn" id="btnWav" disabled>⭳ Download WAV</button>
+          <button class="btn" id="btnMp3" disabled>⭳ Download MP3</button>
+        </div>
+        <div class="status-line" id="statusLine">Menunggu file audio…</div>
+      </div>
+
+    </div>
+
+    <!-- RIGHT: history -->
+    <div>
+      <div class="panel">
+        <div class="panel-title">Conversion History</div>
+        <div id="histList"><div class="hist-empty">Belum ada riwayat konversi.</div></div>
+        <div class="hist-note">Riwayat disimpan di browser ini saja (localStorage).</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
