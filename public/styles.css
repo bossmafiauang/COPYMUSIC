@@ -105,23 +105,6 @@ input[type=range]::-moz-range-thumb{
   width:14px;height:14px;border-radius:50%;background:var(--brass);border:2px solid #0f1013;cursor:pointer;
 }
 
-.eq-row{display:flex;justify-content:space-between;gap:8px;padding:10px 4px 4px;}
-.eq-band{display:flex;flex-direction:column;align-items:center;gap:6px;flex:1;}
-.eq-db{font-family:var(--mono);font-size:10px;color:var(--teal);height:14px;}
-.fader-track{
-  position:relative;width:28px;height:130px;background:#101216;border:1px solid var(--border);border-radius:4px;
-  display:flex;align-items:center;justify-content:center;
-}
-.fader-track input[type=range]{
-  width:130px;height:26px;
-  transform:rotate(-90deg);
-  background:transparent;
-}
-.fader-track input[type=range]::-webkit-slider-runnable-track{
-  height:4px;border-radius:2px;background:var(--border);
-}
-.eq-hz{font-family:var(--mono);font-size:9px;color:var(--text-dim);}
-
 .presets{display:flex;gap:6px;margin-top:12px;flex-wrap:wrap;}
 .chip{
   font-family:var(--mono);font-size:10px;letter-spacing:1px;text-transform:uppercase;

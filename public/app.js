@@ -1,13 +1,4 @@
 (function(){
-  const EQ_FREQS = [60,250,1000,4000,12000];
-  const EQ_LABELS = ["60","250","1K","4K","12K"];
-  const PRESETS = {
-    flat:  [0,0,0,0,0],
-    bass:  [6,4,0,-2,-3],
-    vocal: [-3,0,4,3,0],
-    bright:[-2,-1,1,4,6],
-    lofi:  [2,0,-6,-8,-10]
-  };
   const HISTORY_KEY = 'playbackbay_history';
   const HISTORY_MAX = 50;
 
@@ -16,7 +7,7 @@
   let sourceFile = null;
   let previewSource = null;
   let vuRAF = null;
-  let wavBlobUrl = null, mp3BlobUrl = null;
+  let wavBlobUrl = null, mp3BlobUrl = null, oggBlobUrl = null;
 
   const el = id => document.getElementById(id);
   const dropZone = el('dropZone'), fileInput = el('fileInput');
@@ -29,8 +20,7 @@
   const speedNormalReadout = el('speedNormalReadout');
   const advToggle = el('advToggle'), advBody = el('advBody'), advChevron = el('advChevron'), advSummary = el('advSummary');
   const speedPresets = el('speedPresets');
-  const eqRow = el('eqRow');
-  const btnPreview = el('btnPreview'), btnExport = el('btnExport'), btnWav = el('btnWav'), btnMp3 = el('btnMp3');
+  const btnPreview = el('btnPreview'), btnExport = el('btnExport'), btnWav = el('btnWav'), btnMp3 = el('btnMp3'), btnOgg = el('btnOgg');
   const statusLine = el('statusLine');
   const normalizeToggle = el('normalizeToggle');
   const ledDecode = el('ledDecode'), ledProc = el('ledProc'), ledOut = el('ledOut'), ledPeak = el('ledPeak');
@@ -44,43 +34,6 @@
   function setLed(node, state){
     node.className = 'led' + (state && state!=='off' ? (' on-'+state) : '');
   }
-
-  // ---------- EQ sliders ----------
-  const eqSliders = [];
-  EQ_FREQS.forEach((f,i)=>{
-    const band = document.createElement('div');
-    band.className = 'eq-band';
-    band.innerHTML = `
-      <div class="eq-db" data-idx="${i}">0dB</div>
-      <div class="fader-track"><input type="range" min="-12" max="12" step="1" value="0" data-idx="${i}"></div>
-      <div class="eq-hz">${EQ_LABELS[i]}</div>
-    `;
-    eqRow.appendChild(band);
-    const input = band.querySelector('input');
-    const dbLabel = band.querySelector('.eq-db');
-    input.addEventListener('input', ()=>{
-      dbLabel.textContent = (input.value>0?'+':'')+input.value+'dB';
-      clearActivePreset();
-    });
-    eqSliders.push(input);
-  });
-  function setEQ(values){
-    values.forEach((v,i)=>{
-      eqSliders[i].value = v;
-      eqRow.querySelectorAll('.eq-db')[i].textContent = (v>0?'+':'')+v+'dB';
-    });
-  }
-  function getEQ(){ return eqSliders.map(s=>parseFloat(s.value)); }
-  function clearActivePreset(){
-    document.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
-  }
-  document.querySelectorAll('.chip').forEach(chip=>{
-    chip.addEventListener('click', ()=>{
-      clearActivePreset();
-      chip.classList.add('active');
-      setEQ(PRESETS[chip.dataset.preset]);
-    });
-  });
 
   // ---------- File loading ----------
   dropZone.addEventListener('click', ()=>fileInput.click());
@@ -273,23 +226,13 @@
     return timeStretch(resampled, factor);
   }
 
-  async function renderEQAndGain(buffer, eqGains, ampDb){
+  async function renderGain(buffer, ampDb){
     const offline = new OfflineAudioContext(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
     const src = offline.createBufferSource();
     src.buffer = buffer;
-    let node = src;
-    EQ_FREQS.forEach((f,i)=>{
-      const filt = offline.createBiquadFilter();
-      filt.type = 'peaking';
-      filt.frequency.value = f;
-      filt.Q.value = 1.0;
-      filt.gain.value = eqGains[i];
-      node.connect(filt);
-      node = filt;
-    });
     const gain = offline.createGain();
     gain.gain.value = Math.pow(10, ampDb/20);
-    node.connect(gain);
+    src.connect(gain);
     gain.connect(offline.destination);
     src.start(0);
     return await offline.startRendering();
@@ -411,6 +354,38 @@
     }
   }
 
+  // ---------- OGG encoding (real-time capture via MediaRecorder) ----------
+  function encodeOgg(buffer){
+    return new Promise((resolve)=>{
+      try{
+        const mimeType = 'audio/ogg;codecs=opus';
+        if(!window.MediaRecorder || !MediaRecorder.isTypeSupported(mimeType)){
+          resolve(null);
+          return;
+        }
+        const ctx = new (window.AudioContext||window.webkitAudioContext)();
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        const dest = ctx.createMediaStreamDestination();
+        src.connect(dest);
+        const recorder = new MediaRecorder(dest.stream, {mimeType});
+        const chunks = [];
+        recorder.ondataavailable = ev=>{ if(ev.data && ev.data.size>0) chunks.push(ev.data); };
+        recorder.onstop = ()=>{
+          ctx.close();
+          resolve(chunks.length ? new Blob(chunks, {type:'audio/ogg'}) : null);
+        };
+        recorder.onerror = ()=>{ try{ctx.close();}catch(e){} resolve(null); };
+        recorder.start();
+        src.start(0);
+        src.onended = ()=>{ setTimeout(()=>{ try{ recorder.stop(); }catch(e){ resolve(null); } }, 200); };
+      }catch(err){
+        console.error('OGG encode setup failed', err);
+        resolve(null);
+      }
+    });
+  }
+
   // ---------- VU meter ----------
   function setNeedle(level){
     const angle = -45 + level*90;
@@ -442,12 +417,6 @@
     src.playbackRate.value = speedRate * Math.pow(2, pitchSt/12);
 
     let node = src;
-    EQ_FREQS.forEach((f,i)=>{
-      const filt = audioCtx.createBiquadFilter();
-      filt.type='peaking'; filt.frequency.value=f; filt.Q.value=1.0;
-      filt.gain.value = getEQ()[i];
-      node.connect(filt); node = filt;
-    });
     const gain = audioCtx.createGain();
     gain.gain.value = Math.pow(10, parseFloat(amplify.value)/20);
     node.connect(gain);
@@ -482,7 +451,7 @@
     if(!originalBuffer) return;
     stopPreview();
     btnExport.disabled = true;
-    btnWav.disabled = true; btnMp3.disabled = true;
+    btnWav.disabled = true; btnMp3.disabled = true; btnOgg.disabled = true;
     setLed(ledProc,'off'); setLed(ledOut,'off');
     try{
       setStatus('Memproses speed & pitch…');
@@ -492,10 +461,9 @@
       const processed = buildProcessedBuffer(originalBuffer, s, e, speedRate, pitchSt);
       setLed(ledProc,'green');
 
-      setStatus('Menerapkan EQ & amplify…');
-      const eqGains = getEQ();
+      setStatus('Menerapkan amplify…');
       const ampDb = parseFloat(amplify.value);
-      let rendered = await renderEQAndGain(processed, eqGains, ampDb);
+      let rendered = await renderGain(processed, ampDb);
 
       if(normalizeToggle.checked){
         setStatus('Normalisasi volume…');
@@ -510,12 +478,13 @@
 
       setLed(ledOut,'green');
 
-      setStatus('Encoding WAV & MP3…');
+      setStatus('Encoding WAV…');
       const wavBlob = encodeWav(rendered);
       if(wavBlobUrl) URL.revokeObjectURL(wavBlobUrl);
       wavBlobUrl = URL.createObjectURL(wavBlob);
       btnWav.disabled = false;
 
+      setStatus('Encoding MP3…');
       const mp3Blob = encodeMp3(rendered);
       if(mp3Blob){
         if(mp3BlobUrl) URL.revokeObjectURL(mp3BlobUrl);
@@ -525,17 +494,31 @@
         btnMp3.disabled = true;
       }
 
+      setStatus('Encoding OGG (real-time, mohon tunggu)…');
+      let oggBlob = null;
+      try{ oggBlob = await encodeOgg(rendered); }catch(err){ console.error('OGG encode failed', err); }
+      if(oggBlob){
+        if(oggBlobUrl) URL.revokeObjectURL(oggBlobUrl);
+        oggBlobUrl = URL.createObjectURL(oggBlob);
+        btnOgg.disabled = false;
+        btnOgg.title = '';
+      } else {
+        btnOgg.disabled = true;
+        btnOgg.title = 'Browser kamu tidak mendukung export OGG langsung — coba pakai Firefox, atau gunakan WAV/MP3.';
+      }
+
       const speedNormal = (1/speedRate).toFixed(2);
       setStatus('Selesai. Speed Normal (di game): '+speedNormal+' · Durasi hasil: '+formatTime(rendered.duration), 'ok');
 
       saveHistoryEntry({
         filename: sourceFile ? sourceFile.name : 'audio',
         speed: speedRate, pitch: pitchSt, amplify: ampDb,
-        eq: eqGains, trimStart: s, trimEnd: e,
+        trimStart: s, trimEnd: e,
         maxDuration: maxDurSec,
         normalize: normalizeToggle.checked,
         outDuration: rendered.duration,
         hasMp3: !!mp3Blob,
+        hasOgg: !!oggBlob,
         createdAt: Date.now()
       });
     }catch(err){
@@ -559,6 +542,13 @@
     const a = document.createElement('a');
     a.href = mp3BlobUrl;
     a.download = (sourceFile? sourceFile.name.replace(/\.[^.]+$/,'') : 'audio') + '_playbackbay.mp3';
+    a.click();
+  });
+  btnOgg.addEventListener('click', ()=>{
+    if(!oggBlobUrl) return;
+    const a = document.createElement('a');
+    a.href = oggBlobUrl;
+    a.download = (sourceFile? sourceFile.name.replace(/\.[^.]+$/,'') : 'audio') + '_playbackbay.ogg';
     a.click();
   });
 
@@ -627,7 +617,6 @@
   }
 
   renderHistory();
-  setEQ(PRESETS.flat);
   updateAdvSummary();
   highlightSpeedPreset();
 })();
