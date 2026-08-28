@@ -1,0 +1,15 @@
+{
+  "name": "playback-bay",
+  "version": "1.0.0",
+  "description": "Personal audio prep console - speed, pitch, EQ, trim, normalize. All processing happens client-side in the browser.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
